@@ -22,6 +22,8 @@ var filepath string
 var temperature float64
 var coolRate float64
 var g *Undirected
+var best []int
+var bestFit float64
 
 // Hamiltonian is a hamiltonian cycle.
 // it consists of a cycle and a fitness grade
@@ -40,18 +42,26 @@ func EvenHeat(fp string, initialTemperature float64) []int {
 	rand.Seed(time.Now().Unix())
 
 	temperature = initialTemperature
-	coolRate = 0.01
+	coolRate = 0.000001
 
 	g = NewWeightedGraphFromFile(filepath) //O(n)
 	startPath := makeRandomPath()
 
-	fmt.Printf("Start path: %v\n", startPath.path)
-
 	endPath := anneal(startPath)
 
-	fmt.Printf("Final path: %v\n", endPath.path)
+	fmt.Println("Fitness =  ", fitness(endPath.path))
+	printPath(endPath.path)
 
 	return endPath.path
+}
+
+func printPath(p []int) {
+	//fmt.Printf("%v\n", p)
+	fmt.Print("Path = [")
+	for i := 0; i < len(p)-1; i++ {
+		fmt.Printf(" %d,", p[i])
+	}
+	fmt.Printf(" %d ]\n", p[-1+len(p)])
 }
 
 // acceptNewPath allways accepts a better path, and accepts
@@ -77,15 +87,19 @@ func acceptNewPath(curPath, newPath []int) bool {
 }
 
 func anneal(p *Hamiltonian) *Hamiltonian {
+	path := make([]int, len(p.path))
+	copy(path, p.path)
 
-	var path []int
+	best = make([]int, len(p.path))
+	copy(best, p.path)
+
+	bestFit = fitness(best)
 
 	for temperature > 0 {
-		fmt.Println(fitness(path))
-		path = phase1(p.path)
+		path = phase1(path)
 		temperature -= coolRate
 	}
-	p.path = path
+	copy(p.path, best)
 
 	return p
 }
@@ -101,22 +115,32 @@ func anneal(p *Hamiltonian) *Hamiltonian {
 // improvement happening.
 func phase1(curpath []int) []int {
 
-	numMax := 30
+	numMax := 300
 	numAccepts := 0
 	numRejects := 0
 
+	newPath := make([]int, len(curpath))
+
+	// count rejections and accepts seperately
+	// for anticipated "equalibium" redefinition
 	for numRejects+numAccepts < numMax {
-		newPath := twoOpt(curpath)
+		newPath = twoOpt(curpath)
 
 		if acceptNewPath(curpath, newPath) {
-			curpath = newPath
+			copy(curpath, newPath)
 			numAccepts++
 		} else {
 			numRejects++
 		}
+
+		fit := fitness(curpath)
+		if fit < bestFit {
+			copy(best, curpath)
+			bestFit = fit
+		}
 	}
 
-	return curpath
+	return newPath
 }
 
 // two-opt performs a 2-opt switch of two elements
@@ -138,6 +162,43 @@ func twoOpt(path []int) []int {
 	}
 	newPath = append(newPath, path[j:]...)
 	//fmt.Printf("%v\n", newPath)
+
+	return newPath
+}
+
+// two-opt performs a 2-opt switch of two elements
+// in a path.
+func twoOptSwap(path []int) []int {
+	i := rand.Intn(len(path) - 1)
+	j := (i + 1) % len(path)
+
+	//fmt.Printf("%v\ni: %d\nj: %d\n", path, i, j)
+	newPath := make([]int, len(path))
+	copy(newPath, path)
+
+	temp := newPath[i]
+	newPath[i] = newPath[j]
+	newPath[j] = temp
+
+	return newPath
+}
+
+// two-opt performs a 2-opt switch of two elements
+// in a path.
+func twoOptSwitch(path []int) []int {
+	i := rand.Intn(len(path) - 1)
+	j := rand.Intn(len(path))
+
+	for j == i {
+		j = rand.Intn(len(path))
+	}
+	//fmt.Printf("%v\ni: %d\nj: %d\n", path, i, j)
+	newPath := make([]int, len(path))
+	copy(newPath, path)
+
+	temp := newPath[i]
+	newPath[i] = newPath[j]
+	newPath[j] = temp
 
 	return newPath
 }
