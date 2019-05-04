@@ -9,21 +9,20 @@ import (
 	. "github.com/athorp96/graphs"
 )
 
-// if somehow I need to change how this is checked, this provides an interface
-
-// A rerecombination is a function that somehow constructs a child Hamiltonian
-// from two other Hamiltonians.
-
-// Hamiltonian is a hamiltonian cycle.
-// it consists of a cycle and a fitness grade
-// the lower the fitness, the shorter the cycle
-
+// starting parameters
 var filepath string
 var temperature float64
 var coolRate float64
+var numProcessors int
+var chunksize int
+
+// algorithm globals
 var g *Undirected
 var best []int
 var bestFit float64
+
+const ready int = 1
+const done int = 2
 
 // Hamiltonian is a hamiltonian cycle.
 // it consists of a cycle and a fitness grade
@@ -37,17 +36,24 @@ type Hamiltonian struct {
 	fitness float64
 }
 
+// EvenHeat handles some of the overhead for the algorithm
+// make the graph, plot the energy over time, printing, etc
 func EvenHeat(fp string, initialTemperature float64) []int {
 	filepath = fp
 	rand.Seed(time.Now().Unix())
 
 	temperature = initialTemperature
 	coolRate = 0.000001
+	numProcessors = 6
+	chunksize = 4
 
 	g = NewWeightedGraphFromFile(filepath) //O(n)
 	startPath := makeRandomPath()
 
-	endPath := anneal(startPath)
+	c := make(chan float64)
+
+	go energyTracker(c)
+	endPath := anneal(startPath, c)
 
 	fmt.Println("Fitness =  ", fitness(endPath.path))
 	printPath(endPath.path)
@@ -55,53 +61,88 @@ func EvenHeat(fp string, initialTemperature float64) []int {
 	return endPath.path
 }
 
-func printPath(p []int) {
-	//fmt.Printf("%v\n", p)
-	fmt.Print("Path = [")
-	for i := 0; i < len(p)-1; i++ {
-		fmt.Printf(" %d,", p[i])
+func energyTracker(c chan float64) {
+	for e := range c {
+		fmt.Printf("%f\n", e)
 	}
-	fmt.Printf(" %d ]\n", p[-1+len(p)])
+	fmt.Println("Done")
 }
 
-// acceptNewPath allways accepts a better path, and accepts
-// a worse path with probability p(d, T) = e^(-d/T)
-func acceptNewPath(curPath, newPath []int) bool {
-	p1 := fitness(curPath)
-	p2 := fitness(newPath)
-
-	if p1 > p2 {
-		return true
-	} else {
-		d := p2 - p1
-		p := float64(math.Exp((-1 * d) / temperature))
-		//fmt.Printf("%f = e^-(%f-%f) / %f\n", p, p2, p1, temperature)
-		randNum := rand.Float64()
-		if randNum <= p {
-			//fmt.Println("accepted")
-		} else {
-			//fmt.Println("rejected")
-		}
-		return randNum <= p
-	}
-}
-
-func anneal(p *Hamiltonian) *Hamiltonian {
+func anneal(p *Hamiltonian, energyChan chan float64) *Hamiltonian {
 	path := make([]int, len(p.path))
 	copy(path, p.path)
 
 	best = make([]int, len(p.path))
 	copy(best, p.path)
-
 	bestFit = fitness(best)
 
+	// create processors
+	toProcessors := make(chan int)
+	fromProcessors := make(chan int)
+	n := len(path)
 	for temperature > 0 {
-		path = phase1(path)
+		for i := 0; i < numProcessors; i++ {
+			j := i * chunksize
+			top := path[n-j-chunksize : n-j]
+			bot := path[j : j+chunksize]
+			process(top, bot, toProcessors, fromProcessors)
+		}
+
+		//fmt.Printf("%v\n", path)
+
+		energyChan <- fitness(path)
+		path = quarterTurn(path)
 		temperature -= coolRate
 	}
-	copy(p.path, best)
+
+	copy(p.path, path)
+	close(energyChan)
 
 	return p
+}
+
+func quarterTurn(p []int) []int {
+
+	quarter := p[0:2] // take first two elements off an end
+	rest := p[2:]     // and get the path without those elements
+	turned := make([]int, len(rest))
+	copy(turned, rest)
+	turned = append(turned, quarter...)
+
+	return turned
+}
+
+// a process performs the algorithm specified on a "top tier"
+// path and "bottom tier" path.
+//
+// process are designed to run independantly. They perform
+// their work on a portion of an array, and are managed by
+// the anneal function.
+//
+// - perform swapping on the bottom tier
+// - perform swapping on the top tier
+// - permorm remote swapping between the tiers
+// - return the results and where each tier starts
+func process(top, bot []int, rx, tx chan int) {
+
+	botChan := make(chan []int)
+	topChan := make(chan []int)
+
+	// run concurrent top and bottom
+	// tier work concurrently
+	go localMin(bot, botChan)
+	go localMin(top, topChan)
+
+	for i := 0; i < 2; i++ {
+		select {
+		case newBot := <-botChan:
+			copy(bot, newBot)
+		case newTop := <-topChan:
+			copy(top, newTop)
+		}
+	}
+	// perform remote swapping
+	remoteSwap(top, bot)
 }
 
 // phase 1 opperates as follows:
@@ -113,7 +154,7 @@ func anneal(p *Hamiltonian) *Hamiltonian {
 // Currently equalibrium is defined as some number of new path
 // rejections in a row, as this would mean there is little to no
 // improvement happening.
-func phase1(curpath []int) []int {
+func localMin(curpath []int, retChan chan []int) {
 
 	numMax := 300
 	numAccepts := 0
@@ -132,15 +173,37 @@ func phase1(curpath []int) []int {
 		} else {
 			numRejects++
 		}
+	}
+	retChan <- newPath
+}
 
-		fit := fitness(curpath)
-		if fit < bestFit {
-			copy(best, curpath)
-			bestFit = fit
+// Remote swap opperates as follows:
+// - swap two elements between the top and bottom tiers
+// - accept the swap with the acceptNewPath function
+// - repeat until equalibrium
+//
+// Currently equalibrium is defined as some number of new path
+// rejections in a row, as this would mean there is little to no
+// improvement happening.
+func remoteSwap(top, bot []int) ([]int, []int) {
+	numMax := 300
+	numAccepts := 0
+	numRejects := 0
+
+	// count rejections and accepts seperately
+	// for anticipated "equalibium" redefinition
+	for numRejects+numAccepts < numMax {
+		newTop, newBot := twoOptRemote(top, bot)
+
+		if acceptNewRemotePath(top, bot, newTop, newBot) {
+			copy(bot, newBot)
+			copy(top, newTop)
+			numAccepts++
+		} else {
+			numRejects++
 		}
 	}
-
-	return newPath
+	return top, bot
 }
 
 // two-opt performs a 2-opt switch of two elements
@@ -167,7 +230,7 @@ func twoOpt(path []int) []int {
 }
 
 // two-opt performs a 2-opt switch of two elements
-// in a path.
+// in a path. **swaps elements i and j
 func twoOptSwap(path []int) []int {
 	i := rand.Intn(len(path) - 1)
 	j := (i + 1) % len(path)
@@ -184,7 +247,25 @@ func twoOptSwap(path []int) []int {
 }
 
 // two-opt performs a 2-opt switch of two elements
-// in a path.
+// in a path. **swaps elements i and j
+func twoOptRemote(top, bot []int) ([]int, []int) {
+	newBot := make([]int, len(bot))
+	newTop := make([]int, len(top))
+	copy(newBot, bot)
+	copy(newTop, top)
+
+	i := rand.Intn(len(top))
+	j := rand.Intn(len(bot))
+
+	temp := newTop[i]
+	newTop[i] = newBot[j]
+	newBot[j] = temp
+
+	return newTop, newBot
+}
+
+// two-opt performs a 2-opt reversal between two elements
+// in a path. **reverses elements between i and j
 func twoOptSwitch(path []int) []int {
 	i := rand.Intn(len(path) - 1)
 	j := rand.Intn(len(path))
@@ -222,4 +303,55 @@ func fitness(walk []int) float64 {
 		length += g.Weight(walk[i], walk[n])
 	}
 	return length
+}
+
+// acceptNewPath always accepts a better path, and accepts
+// a worse path with probability p(d, T) = e^(-d/T)
+func acceptNewPath(curPath, newPath []int) bool {
+
+	accepted := true
+
+	p1 := fitness(curPath)
+	p2 := fitness(newPath)
+
+	if p1 < p2 {
+		d := p2 - p1
+		p := float64(math.Exp((-1 * d) / temperature))
+		randNum := rand.Float64()
+		accepted = randNum <= p
+	}
+
+	return accepted
+}
+
+// acceptNewRemotePath always accepts a better path, and accepts
+// a worse path with probability p(d, T) = e^(-d/T)
+// it compares the difference of two paths and their respective
+// new paths to determine acceptance
+func acceptNewRemotePath(top, bot, newTop, newBot []int) bool {
+
+	accepted := true
+
+	t1 := fitness(top)
+	t2 := fitness(newTop)
+	b1 := fitness(bot)
+	b2 := fitness(newBot)
+
+	if t1 < t2 || b1 < b2 {
+		d := t2 - t1 + b2 - b1
+		p := float64(math.Exp((-1 * d) / temperature))
+		randNum := rand.Float64()
+		accepted = randNum <= p
+	}
+
+	return accepted
+}
+
+func printPath(p []int) {
+	//fmt.Printf("%v\n", p)
+	fmt.Print("Path = [")
+	for i := 0; i < len(p)-1; i++ {
+		fmt.Printf(" %d,", p[i])
+	}
+	fmt.Printf(" %d ]\n", p[-1+len(p)])
 }
