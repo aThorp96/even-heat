@@ -43,9 +43,9 @@ func EvenHeat(fp string, initialTemperature float64) []int {
 	rand.Seed(time.Now().Unix())
 
 	temperature = initialTemperature
-	coolRate = 0.000001
-	numProcessors = 6
-	chunksize = 4
+	coolRate = 0.0001
+	numProcessors = 3
+	chunksize = 8
 
 	g = NewWeightedGraphFromFile(filepath) //O(n)
 	startPath := makeRandomPath()
@@ -55,17 +55,17 @@ func EvenHeat(fp string, initialTemperature float64) []int {
 	go energyTracker(c)
 	endPath := anneal(startPath, c)
 
-	fmt.Println("Fitness =  ", fitness(endPath.path))
-	printPath(endPath.path)
+	fmt.Println("# Fitness =  ", fitness(endPath.path))
+	//printPath(endPath.path)
 
 	return endPath.path
 }
 
 func energyTracker(c chan float64) {
 	for e := range c {
-		fmt.Printf("%f\n", e)
+		fmt.Printf("# %f\n", e)
 	}
-	fmt.Println("Done")
+	fmt.Println("# Done")
 }
 
 func anneal(p *Hamiltonian, energyChan chan float64) *Hamiltonian {
@@ -85,17 +85,24 @@ func anneal(p *Hamiltonian, energyChan chan float64) *Hamiltonian {
 			j := i * chunksize
 			top := path[n-j-chunksize : n-j]
 			bot := path[j : j+chunksize]
-			process(top, bot, toProcessors, fromProcessors)
+			go process(top, bot, toProcessors, fromProcessors)
 		}
 
-		//fmt.Printf("%v\n", path)
+		// wait for all processes to finish
+		for i := 0; i < numProcessors; i++ {
+			_ = <-fromProcessors
+		}
 
 		energyChan <- fitness(path)
+		if fitness(path) < bestFit {
+			bestFit = fitness(path)
+			copy(best, path)
+		}
 		path = quarterTurn(path)
 		temperature -= coolRate
 	}
 
-	copy(p.path, path)
+	copy(p.path, best)
 	close(energyChan)
 
 	return p
@@ -135,14 +142,13 @@ func process(top, bot []int, rx, tx chan int) {
 
 	for i := 0; i < 2; i++ {
 		select {
-		case newBot := <-botChan:
-			copy(bot, newBot)
-		case newTop := <-topChan:
-			copy(top, newTop)
+		case _ = <-botChan:
+		case _ = <-topChan:
 		}
 	}
 	// perform remote swapping
 	remoteSwap(top, bot)
+	tx <- done
 }
 
 // phase 1 opperates as follows:
@@ -319,6 +325,9 @@ func acceptNewPath(curPath, newPath []int) bool {
 		p := float64(math.Exp((-1 * d) / temperature))
 		randNum := rand.Float64()
 		accepted = randNum <= p
+		fmt.Println("0")
+	} else {
+		fmt.Println("1")
 	}
 
 	return accepted
@@ -337,11 +346,27 @@ func acceptNewRemotePath(top, bot, newTop, newBot []int) bool {
 	b1 := fitness(bot)
 	b2 := fitness(newBot)
 
-	if t1 < t2 || b1 < b2 {
-		d := t2 - t1 + b2 - b1
+	if t1 < t2 && b1 > b2 {
+		//fmt.Printf("Worse path ")
+		d := t2 - t1
 		p := float64(math.Exp((-1 * d) / temperature))
 		randNum := rand.Float64()
 		accepted = randNum <= p
+	} else if t1 > t2 && b1 < b2 {
+		//fmt.Printf("Worse path ")
+		d := b2 - b1
+		p := float64(math.Exp((-1 * d) / temperature))
+		randNum := rand.Float64()
+		accepted = randNum <= p
+	} else if t1 < t2 && b1 < b2 {
+		d := t2 - t1 + b2 - b1
+		d = d / 2
+		p := float64(math.Exp((-1 * d) / temperature))
+		randNum := rand.Float64()
+		accepted = randNum <= p
+		//fmt.Println("0")
+	} else {
+		//fmt.Println("1")
 	}
 
 	return accepted
@@ -349,7 +374,7 @@ func acceptNewRemotePath(top, bot, newTop, newBot []int) bool {
 
 func printPath(p []int) {
 	//fmt.Printf("%v\n", p)
-	fmt.Print("Path = [")
+	fmt.Print("# Path = [")
 	for i := 0; i < len(p)-1; i++ {
 		fmt.Printf(" %d,", p[i])
 	}
