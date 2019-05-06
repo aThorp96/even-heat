@@ -1,2 +1,2 @@
 # even-heat
-My playground for a simulated annealing solution to the travelling salesman problem. 
+Implimentation of a concurrent simulated annealing algorithm for the Traveling Salesman Problem 
